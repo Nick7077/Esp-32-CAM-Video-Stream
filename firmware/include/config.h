@@ -32,3 +32,12 @@
 #define UDP_PORT 5005
 #define UDP_CHUNK 1440                  // payload bytes per datagram (fits one Wi-Fi frame)
 #define UDP_CLIENT_TIMEOUT_MS 3000      // stop sending if the PC stops saying "SUB"
+
+// ---- Browser / MJPEG stream (port 81) -----------------------------------------
+// Busy scenes and camera motion make JPEGs 2-3x bigger. The stream times how long each
+// frame takes to send and compresses harder while Wi-Fi can't keep up (streamHandler in
+// web_server.cpp). It never goes better than the quality you set, and resets when the
+// stream closes.
+#define STREAM_TARGET_FRAME_MS  70   // aim: each frame fully sent within this (~14 fps floor)
+#define STREAM_MAX_AUTO_QUALITY 40   // most compression auto mode will use (higher = smaller)
+#define STREAM_SEND_TIMEOUT_S   2    // drop a stalled connection after this; the page reconnects

@@ -18,3 +18,9 @@ bool cameraSet(const char *var, const char *val);
 size_t cameraStatusJson(char *out, size_t len);
 
 const char *framesizeName(framesize_t fs);
+
+// JPEG quality the user asked for, and the one the sensor is using right now. The
+// browser stream may compress harder for a while (never better) when Wi-Fi can't keep up.
+int cameraUserQuality();
+int cameraLiveQuality();
+void cameraSetLiveQuality(int q);  // clamped to [user quality, 63]

@@ -1,14 +1,25 @@
 #include "usb_link.h"
 #include <stdarg.h>
 #include "esp_camera.h"
+#include "esp_log.h"
 #include "camera.h"
 #include "net.h"
 
 static const uint8_t FRAME_MAGIC[4] = {0xA5, 0x5A, 0xC3, 0x3C};
 
+static const size_t USB_WRITE_CHUNK = 2048;   // see writeAll()
+
 static SemaphoreHandle_t txMutex = nullptr;   // one writer at a time on the USB link
 static volatile bool streaming = false;
 bool (*usbCustomCommand)(const char *line) = nullptr;
+
+// ESP-IDF log output (Wi-Fi, camera driver, httpd, ...) -> UART port only.
+static int uartLogVprintf(const char *fmt, va_list ap) {
+  char buf[192];
+  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  if (n > 0) Serial0.write((const uint8_t *)buf, min((size_t)n, sizeof(buf) - 1));
+  return n;
+}
 
 void usbBegin() {
   Serial.setTxBufferSize(16 * 1024);  // must precede begin(); bigger ring = higher throughput
@@ -18,6 +29,13 @@ void usbBegin() {
   // Also mirror text (not video) to the UART port (CH340 / 'COM' USB-C) so the
   // Serial Monitor shows the IP whichever port you're plugged into.
   Serial0.begin(115200);
+
+  // Keep log output off the native USB port. The core mirrors its console there
+  // (CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG) by writing straight to the USB
+  // hardware, bypassing our mutex, so an error log from any task landed in the middle
+  // of a JPEG frame and desynced the stream. Logs now go to the UART (COM) port only.
+  Serial0.setDebugOutput(true);         // ets_printf / log_e -> UART only (drops the USB copy)
+  esp_log_set_vprintf(uartLogVprintf);  // ESP_LOGx from IDF components -> UART only
   txMutex = xSemaphoreCreateMutex();
 }
 
@@ -38,10 +56,15 @@ void usbPrintf(const char *fmt, ...) {
 // Writes every byte, riding out short stalls (host briefly busy decoding etc.).
 // Serial.write() on the native USB port returns a *partial* count after the TX
 // timeout; a single unchecked call used to truncate frames and desync the stream.
+// Worse, while the core thinks the host is gone (its USB "connected" check can flap
+// for a few ms on a healthy link) write() silently throws bytes away and still
+// reports them written. So write in small pieces and abandon the frame the moment
+// that happens; the host discards the cut-short frame and resyncs on the next one.
 static bool writeAll(const uint8_t *p, size_t n, uint32_t stallMs = 1000) {
   uint32_t lastProgress = millis();
   while (n) {
-    size_t w = Serial.write(p, n);
+    if (!HWCDC::isConnected()) return false;
+    size_t w = Serial.write(p, min(n, USB_WRITE_CHUNK));
     if (w) {
       p += w;
       n -= w;

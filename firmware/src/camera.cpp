@@ -18,6 +18,19 @@ static const FsName FRAME_SIZES[] = {
     {"FHD", FRAMESIZE_FHD},     {"QXGA", FRAMESIZE_QXGA},
 };
 
+static int userQuality = DEFAULT_JPEG_QUALITY;  // set via /control, USB `set quality`
+static int liveQuality = DEFAULT_JPEG_QUALITY;  // what the sensor is using right now
+
+int cameraUserQuality() { return userQuality; }
+int cameraLiveQuality() { return liveQuality; }
+
+void cameraSetLiveQuality(int q) {
+  q = constrain(q, userQuality, 63);
+  if (q == liveQuality) return;
+  sensor_t *s = esp_camera_sensor_get();
+  if (s && s->set_quality(s, q) == 0) liveQuality = q;
+}
+
 const char *framesizeName(framesize_t fs) {
   for (const auto &f : FRAME_SIZES)
     if (f.fs == fs) return f.name;
@@ -115,7 +128,11 @@ bool cameraSet(const char *var, const char *val) {
   if (end == val) return false;
 
   int res = -1;
-  if (!strcmp(var, "quality")) res = s->set_quality(s, constrain(v, 4, 63));
+  if (!strcmp(var, "quality")) {
+    int q = constrain(v, 4, 63);
+    res = s->set_quality(s, q);
+    if (res == 0) userQuality = liveQuality = q;
+  }
   else if (!strcmp(var, "brightness")) res = s->set_brightness(s, v);
   else if (!strcmp(var, "contrast")) res = s->set_contrast(s, v);
   else if (!strcmp(var, "saturation")) res = s->set_saturation(s, v);
@@ -148,10 +165,10 @@ size_t cameraStatusJson(char *out, size_t len) {
   framesize_t fs = s->status.framesize;
   int n = snprintf(out, len,
                    "{\"ok\":true,\"sensor\":\"%s\",\"framesize\":\"%s\",\"width\":%u,\"height\":%u,"
-                   "\"quality\":%u,\"brightness\":%d,\"contrast\":%d,\"saturation\":%d,"
+                   "\"quality\":%d,\"live_quality\":%d,\"brightness\":%d,\"contrast\":%d,\"saturation\":%d,"
                    "\"hmirror\":%u,\"vflip\":%u,\"awb\":%u,\"aec\":%u,\"agc\":%u}",
                    info ? info->name : "unknown", framesizeName(fs), resolution[fs].width,
-                   resolution[fs].height, s->status.quality, s->status.brightness,
+                   resolution[fs].height, userQuality, liveQuality, s->status.brightness,
                    s->status.contrast, s->status.saturation, s->status.hmirror, s->status.vflip,
                    s->status.awb, s->status.aec, s->status.agc);
   return n < 0 ? 0 : ((size_t)n >= len ? len - 1 : (size_t)n);

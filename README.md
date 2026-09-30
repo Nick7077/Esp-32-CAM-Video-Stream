@@ -80,6 +80,22 @@ Keys: `q` quit · `s` save snapshot (original JPEG → `snapshots/`) · `f` cycl
    It also shows `udp.fps` / `udp.dropped` as the board sees them.
 4. **Take the PC off Wi-Fi** (Ethernet or 5 GHz), and give the camera decent light. In dim light, auto-exposure lowers the frame rate.
 
+### Why the browser stream froze on motion (and what it does now)
+
+Motion (in the scene or of the camera) makes each JPEG 2-3x bigger. The browser stream is TCP, and Arduino-ESP32's
+lwIP only keeps about 5.7 KB unacknowledged per connection, with a 3 s initial retransmit timeout. Once the frames
+outgrow the link, sends back up; one lost packet then costs a retransmit timeout, and the picture freezes for seconds.
+The firmware and page now deal with it:
+
+- **Auto compression.** The stream times each frame's send. While frames take longer than `STREAM_TARGET_FRAME_MS`
+  (70 ms), it raises the JPEG quality number (more compression), up to `STREAM_MAX_AUTO_QUALITY`. When there's headroom
+  it eases back toward the quality you set, and never goes better than that. `/status` shows it as `camera.live_quality`.
+  While a browser is streaming this also applies to USB frames, since the sensor has one quality setting.
+- **No Nagle delay.** `TCP_NODELAY` is set on the stream socket.
+- **Stall recovery.** The page reads the stream with `fetch()`. If no frame arrives for 1.5 s, it drops the connection and
+  reconnects. The board gives up on a stalled send after 2 s (`STREAM_SEND_TIMEOUT_S`), so the reconnect is served quickly.
+  The HUD (bottom left) shows fps, frame size, live quality, RSSI and reconnect count.
+
 ## 3. Use it in your own code
 
 ```python
@@ -129,7 +145,7 @@ def process(frame):
 | `http://<ip>/` | Viewer page |
 | `http://<ip>:81/stream` | `multipart/x-mixed-replace` MJPEG. Each part has `Content-Length` and `X-Timestamp`. Also opens in VLC or `cv2.VideoCapture` |
 | `http://<ip>/capture` | One JPEG |
-| `http://<ip>/status` | JSON: mode, ip, rssi, heap/PSRAM, camera settings |
+| `http://<ip>/status` | JSON: mode, ip, rssi, heap/PSRAM, camera settings (`quality` = yours, `live_quality` = in use now) |
 | `http://<ip>/control?var=framesize&val=SVGA` | Change a setting (see below) |
 
 ### USB protocol (native port)

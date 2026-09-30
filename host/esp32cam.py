@@ -350,6 +350,8 @@ def _describe_ports() -> str:
 class UsbCamera(_FrameSource):
     def __init__(self, port: Optional[str] = None, on_text: Optional[Callable[[str], None]] = None):
         super().__init__()
+        self._demux: Optional["FrameDemuxer"] = None
+        self._dropped_before = 0  # from earlier connections
         self.port = port or find_usb_port()
         if not self.port:
             raise RuntimeError(
@@ -381,6 +383,11 @@ class UsbCamera(_FrameSource):
         with self._wlock:
             if self._ser:
                 self._ser.write((line.strip() + "\n").encode())
+
+    @property
+    def frames_dropped(self) -> int:
+        """Frames that arrived damaged (cut short or corrupted on the wire) and were skipped."""
+        return self._dropped_before + (self._demux.bad_frames if self._demux else 0)
 
     def set(self, var: str, val) -> bool:
         """Queue/apply a camera setting. Safe to call before the port is open;
@@ -443,7 +450,9 @@ class UsbCamera(_FrameSource):
         done = threading.Event()
         dec = threading.Thread(target=decoder, name="UsbDecode", daemon=True)
         dec.start()
-        demux = FrameDemuxer(on_frame, self._handle_text)
+        if self._demux:
+            self._dropped_before += self._demux.bad_frames
+        demux = self._demux = FrameDemuxer(on_frame, self._handle_text)
         last_rx = time.monotonic()
         last_kick = 0.0
         try:
@@ -470,15 +479,32 @@ class UsbCamera(_FrameSource):
         self.on_text(line)
 
 
+_PRINTABLE = bytes(range(32, 127)) + b"\t\r"
+
+
+def _looks_like_text(raw: bytes) -> bool:
+    """True if at least 95% of the bytes are printable ASCII (firmware messages are)."""
+    junk = len(raw.translate(None, _PRINTABLE))
+    return junk <= len(raw) // 20
+
+
 class FrameDemuxer:
     """Splits the USB byte stream into JPEG frames and text lines.
-    Kept separate from the serial code so it can be unit-tested."""
+    Kept separate from the serial code so it can be unit-tested.
+
+    If bytes go missing on the wire, a frame's declared length runs into the next
+    frame, and the rest of that frame would otherwise be treated as text (a screenful
+    of binary garbage). So: a frame whose bytes contain the next header is cut short
+    and is dropped (we resync on that header), frames must start with the JPEG SOI
+    and end with EOI, and binary junk between frames is counted, never printed."""
 
     def __init__(self, on_frame: Callable[[bytes, int], object], on_text: Callable[[str], None]):
         self.buf = bytearray()
         self.text = bytearray()
         self.on_frame = on_frame
         self.on_text = on_text
+        self.bad_frames = 0   # frames dropped as damaged
+        self.junk_bytes = 0   # non-text bytes found between frames
 
     def feed(self, data: bytes) -> None:
         self.buf += data
@@ -496,6 +522,11 @@ class FrameDemuxer:
             if i:
                 self._text(self.buf[:i])
                 del self.buf[:i]
+            if self.text:
+                # The firmware never splits a message around a frame, so an unfinished
+                # line at a frame boundary is leftover junk; don't let it swallow the next message.
+                self.junk_bytes += len(self.text)
+                self.text.clear()
             if len(self.buf) < HEADER_LEN:
                 return
             length, ts = struct.unpack_from("<II", self.buf, 4)
@@ -504,8 +535,18 @@ class FrameDemuxer:
                 continue
             if len(self.buf) < HEADER_LEN + length:
                 return  # wait for the rest of the frame
+            j = self.buf.find(FRAME_MAGIC, HEADER_LEN, HEADER_LEN + length)
+            if j >= 0:
+                # The next frame's header is inside this frame: bytes were lost, so
+                # this one is incomplete. Drop it and resync on that header.
+                self.bad_frames += 1
+                del self.buf[:j]
+                continue
             jpeg = bytes(self.buf[HEADER_LEN:HEADER_LEN + length])
             del self.buf[:HEADER_LEN + length]
+            if jpeg[:2] != b"\xff\xd8" or jpeg[-2:] != b"\xff\xd9":
+                self.bad_frames += 1  # corrupted in transit
+                continue
             self.on_frame(jpeg, ts)
 
     def _text(self, chunk: bytes) -> None:
@@ -513,8 +554,12 @@ class FrameDemuxer:
         while b"\n" in self.text:
             line, _, rest = self.text.partition(b"\n")
             self.text = bytearray(rest)
+            if not _looks_like_text(line):
+                self.junk_bytes += len(line)  # leftovers of a damaged frame, not a message
+                continue
             s = line.decode("utf-8", "replace").strip()
             if s:
                 self.on_text(s)
         if len(self.text) > 4096:  # binary junk with no newline; don't grow forever
+            self.junk_bytes += len(self.text)
             self.text.clear()

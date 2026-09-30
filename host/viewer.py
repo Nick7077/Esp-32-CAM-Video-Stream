@@ -41,7 +41,7 @@ def process(frame):
 def draw_hud(img, cam, latency_ms):
     h, w = img.shape[:2]
     text = f"{w}x{h}  {cam.fps:4.1f} fps  process() {latency_ms:4.1f} ms"
-    if isinstance(cam, UdpCamera):
+    if isinstance(cam, (UdpCamera, UsbCamera)):
         text += f"  dropped {cam.frames_dropped}"
     cv2.putText(img, text, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
     cv2.putText(img, text, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (80, 255, 80), 1, cv2.LINE_AA)
