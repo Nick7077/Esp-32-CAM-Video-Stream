@@ -14,7 +14,7 @@ void usbBegin() {
   Serial.setTxBufferSize(16 * 1024);  // must precede begin(); bigger ring = higher throughput
   Serial.setRxBufferSize(512);
   Serial.begin(115200);               // baud is ignored on native USB
-  Serial.setTxTimeoutMs(20);          // don't stall long if the host stops reading
+  Serial.setTxTimeoutMs(50);          // per-call; writeAll() retries up to ~1 s of no progress
   // Also mirror text (not video) to the UART port (CH340 / 'COM' USB-C) so the
   // Serial Monitor shows the IP whichever port you're plugged into.
   Serial0.begin(115200);
@@ -35,6 +35,26 @@ void usbPrintf(const char *fmt, ...) {
   if (txMutex) xSemaphoreGive(txMutex);
 }
 
+// Writes every byte, riding out short stalls (host briefly busy decoding etc.).
+// Serial.write() on the native USB port returns a *partial* count after the TX
+// timeout; a single unchecked call used to truncate frames and desync the stream.
+static bool writeAll(const uint8_t *p, size_t n, uint32_t stallMs = 1000) {
+  uint32_t lastProgress = millis();
+  while (n) {
+    size_t w = Serial.write(p, n);
+    if (w) {
+      p += w;
+      n -= w;
+      lastProgress = millis();
+    } else if (!HWCDC::isConnected() || millis() - lastProgress > stallMs) {
+      return false;
+    } else {
+      vTaskDelay(1);
+    }
+  }
+  return true;
+}
+
 // Sends one frame. Returns false if the host isn't keeping up / went away.
 static bool sendFrame() {
   camera_fb_t *fb = esp_camera_fb_get();
@@ -50,7 +70,7 @@ static bool sendFrame() {
   memcpy(hdr + 8, &ts, 4);
 
   xSemaphoreTake(txMutex, portMAX_DELAY);
-  bool ok = Serial.write(hdr, sizeof(hdr)) == sizeof(hdr) && Serial.write(fb->buf, fb->len) == fb->len;
+  bool ok = writeAll(hdr, sizeof(hdr)) && writeAll(fb->buf, fb->len);
   xSemaphoreGive(txMutex);
   esp_camera_fb_return(fb);
   return ok && HWCDC::isConnected();
@@ -112,9 +132,12 @@ static void usbTask(void *) {
     usbIn.poll(Serial);    // native USB port (commands + video)
     uartIn.poll(Serial0);  // UART / CH340 port (commands only, e.g. typing `status`)
     if (streaming) {
-      if (!sendFrame()) {
-        streaming = false;  // host closed the port or stopped reading
-        log_w("USB host stopped reading; streaming paused (send 'stream on' to resume)");
+      if (!HWCDC::isConnected()) {
+        vTaskDelay(pdMS_TO_TICKS(50));   // no host: don't burn camera frames
+      } else if (!sendFrame()) {
+        // Stalled or truncated frame. Stay in streaming mode (the host resyncs on the
+        // next frame magic) instead of stopping for good, just back off briefly.
+        vTaskDelay(pdMS_TO_TICKS(50));
       }
     } else {
       vTaskDelay(pdMS_TO_TICKS(5));

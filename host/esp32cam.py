@@ -419,11 +419,47 @@ class UsbCamera(_FrameSource):
                     self._ser = None
 
     def _pump(self) -> None:
-        demux = FrameDemuxer(self._publish, self._handle_text)
-        while not self._stop.is_set():
-            data = self._ser.read(self._ser.in_waiting or 1)
-            if data:
-                demux.feed(data)
+        # Reading must never stall: if the host stops draining the port for even a
+        # few ms (JPEG decode, GUI, GIL), the ESP32's USB buffer fills and it drops
+        # bytes mid-frame. So this thread only reads/demuxes; a second thread decodes
+        # (keeping just the newest pending frame).
+        pending = {"jpeg": None, "ts": 0}
+        cond = threading.Condition()
+
+        def on_frame(jpeg: bytes, ts: int) -> None:
+            with cond:
+                pending["jpeg"], pending["ts"] = jpeg, ts   # overwrite: drop stale frames
+                cond.notify()
+
+        def decoder() -> None:
+            while not self._stop.is_set() and not done.is_set():
+                with cond:
+                    if not cond.wait_for(lambda: pending["jpeg"] is not None, 0.2):
+                        continue
+                    jpeg, ts = pending["jpeg"], pending["ts"]
+                    pending["jpeg"] = None
+                self._publish(jpeg, ts)
+
+        done = threading.Event()
+        dec = threading.Thread(target=decoder, name="UsbDecode", daemon=True)
+        dec.start()
+        demux = FrameDemuxer(on_frame, self._handle_text)
+        last_rx = time.monotonic()
+        last_kick = 0.0
+        try:
+            while not self._stop.is_set():
+                data = self._ser.read(self._ser.in_waiting or 1)
+                now = time.monotonic()
+                if data:
+                    last_rx = now
+                    demux.feed(data)
+                elif now - last_rx > 2.0 and now - last_kick > 2.0:
+                    # Video went quiet: make sure the board is (still) streaming.
+                    last_kick = now
+                    self.send("stream on")
+        finally:
+            done.set()
+            dec.join(timeout=1)
 
     def _handle_text(self, line: str) -> None:
         if line.startswith("{"):
