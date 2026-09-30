@@ -1,0 +1,6 @@
+firmware/.pio/
+firmware/.vscode/
+firmware/include/secrets.h
+host/.venv/
+host/snapshots/
+__pycache__/
