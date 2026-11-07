@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include "esp_http_server.h"
 #include "esp_camera.h"
+#include "esp_timer.h"
 #include "lwip/sockets.h"
 #include "lwip/api.h"
 #include "lwip/tcp.h"
@@ -229,8 +230,18 @@ class StreamRateControl {
   uint32_t lastChange_ = 0;
 };
 
+// A stream that ended may be about to reconnect after a stall, and restarting at full quality
+// would hit a struggling link with its biggest frames. So hold the compression level for a
+// while. If no client comes back, restore the user's setting (USB and /capture share it).
+static esp_timer_handle_t qualityRestoreTimer = nullptr;
+
+static void restoreQuality(void *) {
+  cameraSetLiveQuality(cameraUserQuality());
+}
+
 static esp_err_t streamHandler(httpd_req_t *req) {
   char part[160];
+  esp_timer_stop(qualityRestoreTimer);  // fails harmlessly if it isn't running
   httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -259,11 +270,14 @@ static esp_err_t streamHandler(httpd_req_t *req) {
     esp_camera_fb_return(fb);
     if (res == ESP_OK) rate.update(millis() - t0);
   }
-  cameraSetLiveQuality(cameraUserQuality());  // stream over: back to the user's setting (USB shares it)
+  esp_timer_start_once(qualityRestoreTimer, STREAM_QUALITY_HOLD_S * 1000000ULL);
   return res;  // client disconnected or stalled past STREAM_SEND_TIMEOUT_S
 }
 
 void webServerStart() {
+  const esp_timer_create_args_t restoreArgs = {.callback = restoreQuality, .name = "quality_restore"};
+  esp_timer_create(&restoreArgs, &qualityRestoreTimer);
+
   httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
   cfg.server_port = HTTP_PORT;
   cfg.max_uri_handlers = 8;

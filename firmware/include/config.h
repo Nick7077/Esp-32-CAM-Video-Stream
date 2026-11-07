@@ -22,7 +22,10 @@
 // ---- Camera defaults (changeable at runtime over HTTP or USB) --------------
 #define DEFAULT_FRAMESIZE    FRAMESIZE_VGA   // 640x480: good baseline for vision models
 #define DEFAULT_JPEG_QUALITY 12              // 0-63, lower = better image, bigger frames
-#define XCLK_FREQ_HZ         20000000
+// Camera clock. Not the usual 20 MHz: at 20 MHz this board's Wi-Fi nearly stopped working on
+// channel 6 (0-2 fps and heavy packet loss despite a strong signal). 16 MHz set at boot was
+// almost as bad. 12 MHz gives a clean link and 17 fps at VGA. See README before changing it.
+#define XCLK_FREQ_HZ         12000000
 
 // ---- Ports ------------------------------------------------------------------
 #define HTTP_PORT   80   // web UI, /capture, /status, /control
@@ -36,8 +39,9 @@
 // ---- Browser / MJPEG stream (port 81) -----------------------------------------
 // Busy scenes and camera motion make JPEGs 2-3x bigger. The stream times how long each
 // frame takes to send and compresses harder while Wi-Fi can't keep up (streamHandler in
-// web_server.cpp). It never goes better than the quality you set, and resets when the
-// stream closes.
+// web_server.cpp). It never goes better than the quality you set, and resets a few seconds
+// after the stream closes, so a quick reconnect doesn't restart with the biggest frames.
 #define STREAM_TARGET_FRAME_MS  70   // aim: each frame fully sent within this (~14 fps floor)
 #define STREAM_MAX_AUTO_QUALITY 40   // most compression auto mode will use (higher = smaller)
 #define STREAM_SEND_TIMEOUT_S   2    // drop a stalled connection after this; the page reconnects
+#define STREAM_QUALITY_HOLD_S   10   // keep the compression level this long after a stream ends

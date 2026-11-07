@@ -80,6 +80,23 @@ Keys: `q` quit · `s` save snapshot (original JPEG → `snapshots/`) · `f` cycl
    It also shows `udp.fps` / `udp.dropped` as the board sees them.
 4. **Take the PC off Wi-Fi** (Ethernet or 5 GHz), and give the camera decent light. In dim light, auto-exposure lowers the frame rate.
 
+### Camera clock and Wi-Fi interference
+
+The camera clock (`XCLK_FREQ_HZ` in `config.h`) is 12 MHz, not the usual 20 MHz, because at 20 MHz this board's Wi-Fi nearly stopped working.
+The signal reading stayed strong throughout, so RSSI won't warn you about this.
+Measured at VGA on Wi-Fi channel 6, with the clock set at boot:
+
+| Clock | Video | Ping | Ping loss |
+|---|---|---|---|
+| 20 MHz | 0-2 fps, constant reconnects | 170-650 ms | 16-62% |
+| 16 MHz | about 1 fps, constant reconnects | 200-330 ms | 7-16% |
+| 12 MHz | 17 fps, no reconnects | 5 ms | 0% |
+
+The likely cause is radio interference from the camera's clocks, but that isn't proven. Don't assume a nearby clock speed behaves the same: 16 MHz was fine when switched on a running board, but bad when set at boot.
+
+At 12 MHz, QVGA, VGA, SVGA and XGA run at 17 fps and HD at 11 fps. **QXGA brings the problem back** (0.2 fps) until you switch to another resolution. SXGA, UXGA and FHD are untested.
+Only channel 6 has been tested, so another router or channel may need a different clock. Check ping with the stream closed: it should be under about 20 ms.
+
 ### Why the browser stream froze on motion (and what it does now)
 
 Motion (in the scene or of the camera) makes each JPEG 2-3x bigger. The browser stream is TCP, and Arduino-ESP32's
@@ -91,6 +108,8 @@ The firmware and page now deal with it:
   (70 ms), it raises the JPEG quality number (more compression), up to `STREAM_MAX_AUTO_QUALITY`. When there's headroom
   it eases back toward the quality you set, and never goes better than that. `/status` shows it as `camera.live_quality`.
   While a browser is streaming this also applies to USB frames, since the sensor has one quality setting.
+  A reconnect keeps the current compression level instead of restarting with the biggest frames. It returns to your
+  setting 10 s after the last client leaves (`STREAM_QUALITY_HOLD_S`).
 - **No Nagle delay.** `TCP_NODELAY` is set on the stream socket.
 - **Stall recovery.** The page reads the stream with `fetch()`. If no frame arrives for 1.5 s, it drops the connection and
   reconnects. The board gives up on a stalled send after 2 s (`STREAM_SEND_TIMEOUT_S`), so the reconnect is served quickly.
@@ -195,6 +214,7 @@ VGA at quality 12 is a sensible default for vision models. Higher resolutions lo
 | Upload fails | Hold BOOT → tap RST → release BOOT, then upload. Or upload via the COM port. |
 | USB viewer: "port busy" / no frames | Close the Serial Monitor and any other program using the port. |
 | Image upside-down or mirrored | `set vflip 0/1`, `set hmirror 0/1`, or change the defaults in `camera.cpp`. |
+| Slow ping, packet loss or constant reconnects despite a strong signal | The camera clock is probably interfering with your Wi-Fi channel. Move off QXGA if you're using it, or try a different `XCLK_FREQ_HZ` in `config.h`, such as 8000000. See *Camera clock and Wi-Fi interference*. |
 | Laggy Wi-Fi | Use `viewer.py udp`, a lower resolution, or a higher `quality` number. Keep the board near the router, or use the external-antenna variant. See *Getting smooth video over Wi-Fi*. |
 | `udp` mode: "no UDP video from ..." | Re-flash (UDP needs the latest firmware), check the IP, and allow Python through Windows Firewall. Also check the PC's network is set to *Private*. |
 | `esp32cam.local` doesn't resolve | Use the IP from `status`. mDNS doesn't work on every network. |
